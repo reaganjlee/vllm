@@ -75,17 +75,24 @@ def start_server():
     print("Starting vLLM server...")
     print(f"Model: {MODEL}")
     print(f"Port: {PORT}")
-    
+
     # Use a clean HuggingFace cache to avoid corrupted cache issues
     import os
     env = os.environ.copy()
     clean_cache_dir = "/tmp/hf_cache_clean"
     os.makedirs(clean_cache_dir, exist_ok=True)
     env["HF_HOME"] = clean_cache_dir
+
+    # Use the venv with our modified code
+    venv_python = "/workspace/vllm_high/vllm-mm-process-standalone/.venv/bin/python"
+    env["PYTHONPATH"] = "/workspace/vllm_high/vllm-skip-mod:" + env.get("PYTHONPATH", "")
+
     print(f"Using HuggingFace cache: {clean_cache_dir}")
+    print(f"Using Python: {venv_python}")
+    print(f"Using modified vLLM from: /workspace/vllm_high/vllm-skip-mod")
     
     cmd = [
-        "python", "-m", "vllm.entrypoints.openai.api_server",
+        venv_python, "-m", "vllm.entrypoints.openai.api_server",
         "--model", MODEL,
         "--enable-mm-embeds",
         "--limit-mm-per-prompt", '{"image": 0, "video": 0}',
@@ -150,8 +157,11 @@ def run_test():
 
 def main():
     """Main test runner"""
+    # Set PYTHONPATH to use our modified vLLM
+    os.environ["PYTHONPATH"] = "/workspace/vllm_high/vllm-skip-mod:" + os.environ.get("PYTHONPATH", "")
+
     server_process = None
-    
+
     try:
         # Start server
         server_process = start_server()

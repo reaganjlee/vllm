@@ -28,24 +28,52 @@ vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
 
 def create_example_image_embedding(
     num_images: int = 1,
-    feature_size: int = 256,  # Typical image feature size
+    grid_size: int = 16,       # Grid size after spatial merge (16x16 = 256 features)
     hidden_size: int = 4096,   # Hidden size for Qwen2.5-VL models
     dtype: torch.dtype = torch.float16
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Create a dummy image embedding tensor.
-    
-    Shape: (num_images, feature_size, hidden_size)
-    For Qwen2.5-VL models: (1, 256, 4096)
+    Create a dummy image embedding tensor with grid metadata.
+
+    For Qwen2.5-VL, which uses mRoPE (multi-dimensional RoPE), we need:
+    - image_embeds: (num_images, feature_size, hidden_size)
+    - image_grid_thw: (num_images, 3) containing [t, h, w] before spatial merge
+
+    Args:
+        num_images: Number of images
+        grid_size: Grid size after spatial merge (default 16 for 16x16 grid = 256 features)
+        hidden_size: Model hidden dimension
+        dtype: Tensor dtype
+
+    Returns:
+        Tuple of (image_embeds, image_grid_thw)
     """
+    # Calculate feature size: grid_size x grid_size
+    # For a 16x16 grid after merge, we have 256 features
+    feature_size = grid_size * grid_size
+
     # Create random embeddings (in practice, these would come from your encoder)
-    embedding = torch.randn(
-        num_images, 
-        feature_size, 
+    image_embeds = torch.randn(
+        num_images,
+        feature_size,
         hidden_size,
         dtype=dtype
     )
-    return embedding
+
+    # Create grid dimensions: (t, h, w) BEFORE spatial merge
+    # With spatial_merge_size=2 (default for Qwen2.5-VL):
+    # - A 16x16 grid after merge corresponds to 32x32 before merge
+    # - t=1 (temporal dimension, for images)
+    spatial_merge_size = 2
+    original_h = grid_size * spatial_merge_size
+    original_w = grid_size * spatial_merge_size
+
+    image_grid_thw = torch.tensor(
+        [[1, original_h, original_w]] * num_images,
+        dtype=torch.int64
+    )
+
+    return image_embeds, image_grid_thw
 
 
 def main():
@@ -68,21 +96,23 @@ def main():
         print("Using default model name. Make sure it matches your server.")
         model_name = "Qwen/Qwen2.5-VL-7B-Instruct"  # Fallback: must match server
     
-    # Create example image embedding
-    # Shape: (num_images, feature_size, hidden_size)
-    # For Qwen2.5-VL models, typical shape is (1, 256, 4096)
-    print("Creating example image embedding...")
-    image_embeds = create_example_image_embedding(
+    # Create example image embedding with grid metadata
+    # For Qwen2.5-VL models, we need both embeddings and grid dimensions
+    print("Creating example image embedding with grid metadata...")
+    image_embeds, image_grid_thw = create_example_image_embedding(
         num_images=1,
-        feature_size=256,
+        grid_size=16,      # 16x16 = 256 features after merge
         hidden_size=4096,
         dtype=torch.float16
     )
-    print(f"Embedding shape: {image_embeds.shape}")
-    
+    print(f"Image embeddings shape: {image_embeds.shape}")
+    print(f"Image grid_thw shape: {image_grid_thw.shape}")
+    print(f"Grid dimensions (t, h, w): {image_grid_thw[0].tolist()}")
+
     # Convert to base64 for API transmission
-    base64_image_embedding = tensor2base64(image_embeds)
-    print("Embedding serialized to base64")
+    base64_image_embeds = tensor2base64(image_embeds)
+    base64_image_grid_thw = tensor2base64(image_grid_thw)
+    print("Embeddings and grid metadata serialized to base64")
     
     # Send request with embedding input
     print("\nSending chat completion request...")
@@ -102,7 +132,10 @@ def main():
                     },
                     {
                         "type": "image_embeds",
-                        "image_embeds": base64_image_embedding,
+                        "image_embeds": {
+                            "image_embeds": base64_image_embeds,
+                            "image_grid_thw": base64_image_grid_thw,
+                        },
                     },
                 ],
             },

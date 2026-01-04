@@ -1095,6 +1095,21 @@ class Qwen2_5_VLForConditionalGeneration(
         vision_tokens = input_tokens_tensor[vision_start_indices + 1]
         image_nums = (vision_tokens == image_token_id).sum()
         video_nums = (vision_tokens == video_token_id).sum()
+
+        # Validate that we have grid metadata for embeddings
+        if image_nums > 0 and len(image_grid_thw) == 0:
+            raise ValueError(
+                "Qwen2.5-VL requires 'image_grid_thw' when using image embeddings. "
+                "Please provide grid dimensions alongside your embeddings. "
+                "Expected format: {'image_embeds': tensor, 'image_grid_thw': tensor}"
+            )
+        if video_nums > 0 and len(video_grid_thw) == 0:
+            raise ValueError(
+                "Qwen2.5-VL requires 'video_grid_thw' when using video embeddings. "
+                "Please provide grid dimensions alongside your embeddings. "
+                "Expected format: {'video_embeds': tensor, 'video_grid_thw': tensor}"
+            )
+
         llm_pos_ids_list: list = []
 
         st = 0
