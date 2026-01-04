@@ -103,7 +103,7 @@ def calculate_mm_processor_metrics(
 
 
 # ============================================================================
-# Encoder Benchmarking Functions (V1 compatible via collective_rpc)
+# Encoder Benchmarking Functions
 # ============================================================================
 
 
@@ -116,10 +116,7 @@ def benchmark_encoder_forward(
     selected_percentiles: list[float],
 ) -> dict[str, Any] | None:
     """
-    Benchmark encoder forward pass latency using V1 collective_rpc.
-
-    This calls the benchmark_encoder method on the GPU worker where
-    the model actually lives, allowing direct access to the vision encoder.
+    Benchmark encoder forward pass latency.
 
     Args:
         llm: The LLM instance
@@ -132,17 +129,15 @@ def benchmark_encoder_forward(
     Returns:
         Dict with encoder stats, or None if encoder not found
     """
-    # Call benchmark_encoder on the GPU worker via collective_rpc
     try:
         results_list = llm.llm_engine.collective_rpc(
             "benchmark_encoder",
             args=(batch_sizes, image_sizes, num_warmup, num_iterations),
         )
     except Exception as e:
-        print(f"\n⚠️  Warning: Failed to call benchmark_encoder via collective_rpc: {e}")
+        print(f"\n⚠️  Warning: Failed to call benchmark_encoder: {e}")
         return None
 
-    # collective_rpc returns a list of results from all workers
     # We only need results from the first worker (driver)
     if not results_list or results_list[0] is None:
         print("\n⚠️  Warning: Could not find vision encoder in model.")
@@ -405,11 +400,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=100,
         help="Number of timed iterations for encoder benchmark.",
-    )
-    parser.add_argument(
-        "--encoder-use-real-images",
-        action="store_true",
-        help="Use real images from dataset instead of random tensors.",
     )
 
 
