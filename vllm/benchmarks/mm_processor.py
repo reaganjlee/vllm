@@ -103,133 +103,12 @@ def calculate_mm_processor_metrics(
 
 
 # ============================================================================
-# Encoder Benchmarking Functions
+# Encoder Benchmarking Functions (V1 compatible via collective_rpc)
 # ============================================================================
 
 
-def get_vision_encoder(llm_engine: Any) -> torch.nn.Module | None:
-    """
-    Extract vision encoder from vLLM engine.
-
-    Args:
-        llm_engine: The vLLM engine instance
-
-    Returns:
-        The vision encoder module, or None if not found
-    """
-    try:
-        model = llm_engine.model_executor.driver_worker.model_runner.model
-    except AttributeError:
-        return None
-
-    # Handle different model architectures
-    if hasattr(model, "vision_tower"):
-        return model.vision_tower  # LLaVA-style
-    elif hasattr(model, "vision_model"):
-        return model.vision_model  # Other styles
-    elif hasattr(model, "visual"):
-        return model.visual  # Qwen-VL style
-    else:
-        return None
-
-
-def is_supported_encoder(encoder: torch.nn.Module) -> bool:
-    """Check if the encoder type is supported for benchmarking."""
-    # Import here to avoid circular imports
-    try:
-        from vllm.model_executor.models.clip import CLIPVisionModel
-        from vllm.model_executor.models.siglip import SiglipVisionModel
-
-        return isinstance(encoder, (CLIPVisionModel, SiglipVisionModel))
-    except ImportError:
-        return False
-
-
-def create_encoder_inputs(
-    encoder: torch.nn.Module,
-    batch_size: int,
-    image_height: int,
-    image_width: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Create dummy input tensor for encoder forward pass.
-
-    Args:
-        encoder: The vision encoder module
-        batch_size: Number of images in batch
-        image_height: Height of images
-        image_width: Width of images
-        device: Device to create tensor on
-
-    Returns:
-        Random image tensor [batch, channels, height, width]
-    """
-    # Get encoder config for num_channels
-    config = getattr(encoder, "config", None)
-    if config is None:
-        config = getattr(encoder, "vision_config", None)
-
-    num_channels = getattr(config, "num_channels", 3)
-
-    # Get dtype from encoder parameters
-    dtype = torch.float16  # Default
-    for param in encoder.parameters():
-        dtype = param.dtype
-        break
-
-    return torch.randn(
-        batch_size,
-        num_channels,
-        image_height,
-        image_width,
-        device=device,
-        dtype=dtype,
-    )
-
-
-def measure_encoder_latency(
-    encoder: torch.nn.Module,
-    inputs: torch.Tensor,
-    num_warmup: int,
-    num_iterations: int,
-) -> list[float]:
-    """
-    Measure encoder forward pass latency.
-
-    Args:
-        encoder: The vision encoder module
-        inputs: Input tensor for encoder
-        num_warmup: Number of warmup iterations
-        num_iterations: Number of timed iterations
-
-    Returns:
-        List of latency measurements in seconds
-    """
-    encoder.eval()
-
-    # Warmup
-    with torch.no_grad():
-        for _ in range(num_warmup):
-            _ = encoder(inputs)
-
-    # Timed runs
-    torch.cuda.synchronize()
-    latencies = []
-    with torch.no_grad():
-        for _ in range(num_iterations):
-            torch.cuda.synchronize()
-            start = time.perf_counter()
-            _ = encoder(inputs)
-            torch.cuda.synchronize()
-            end = time.perf_counter()
-            latencies.append(end - start)
-
-    return latencies
-
-
 def benchmark_encoder_forward(
-    llm_engine: Any,
+    llm: Any,
     batch_sizes: list[int],
     image_sizes: list[tuple[int, int]],
     num_warmup: int,
@@ -237,10 +116,13 @@ def benchmark_encoder_forward(
     selected_percentiles: list[float],
 ) -> dict[str, Any] | None:
     """
-    Benchmark encoder forward pass latency.
+    Benchmark encoder forward pass latency using V1 collective_rpc.
+
+    This calls the benchmark_encoder method on the GPU worker where
+    the model actually lives, allowing direct access to the vision encoder.
 
     Args:
-        llm_engine: The vLLM engine instance
+        llm: The LLM instance
         batch_sizes: List of batch sizes to test
         image_sizes: List of (height, width) tuples to test
         num_warmup: Number of warmup iterations
@@ -250,61 +132,49 @@ def benchmark_encoder_forward(
     Returns:
         Dict with encoder stats, or None if encoder not found
     """
-    encoder = get_vision_encoder(llm_engine)
-    if encoder is None:
+    # Call benchmark_encoder on the GPU worker via collective_rpc
+    try:
+        results_list = llm.llm_engine.collective_rpc(
+            "benchmark_encoder",
+            args=(batch_sizes, image_sizes, num_warmup, num_iterations),
+        )
+    except Exception as e:
+        print(f"\n⚠️  Warning: Failed to call benchmark_encoder via collective_rpc: {e}")
+        return None
+
+    # collective_rpc returns a list of results from all workers
+    # We only need results from the first worker (driver)
+    if not results_list or results_list[0] is None:
         print("\n⚠️  Warning: Could not find vision encoder in model.")
         return None
 
-    if not is_supported_encoder(encoder):
-        encoder_type = type(encoder).__name__
-        print(
-            f"\n⚠️  Warning: Encoder type '{encoder_type}' is not fully supported. "
-            "Benchmarking may not work correctly."
-        )
+    worker_result = results_list[0]
 
-    # Get device from encoder
-    device = next(encoder.parameters()).device
+    if not worker_result.get("is_supported", False):
+        encoder_type = worker_result.get("encoder_type", "Unknown")
+        print(f"\n⚠️  Warning: Encoder type '{encoder_type}' is not fully supported. Benchmarking may not work correctly.")
 
-    results = []
-    for batch_size in batch_sizes:
-        for height, width in image_sizes:
-            print(
-                f"  Benchmarking: batch_size={batch_size}, "
-                f"image_size={height}x{width}..."
-            )
-
-            inputs = create_encoder_inputs(encoder, batch_size, height, width, device)
-
-            latencies = measure_encoder_latency(
-                encoder, inputs, num_warmup, num_iterations
-            )
-
-            # Convert to milliseconds
-            latencies_ms = [t * 1000 for t in latencies]
-
-            results.append(
-                {
-                    "batch_size": batch_size,
-                    "image_size": f"{height}x{width}",
-                    "mean": float(np.mean(latencies_ms)),
-                    "median": float(np.median(latencies_ms)),
-                    "std": float(np.std(latencies_ms)),
-                    **{
-                        f"p{p}": float(np.percentile(latencies_ms, p))
-                        for p in selected_percentiles
-                    },
-                }
-            )
-
-            # Free memory
-            del inputs
-            torch.cuda.empty_cache()
+    # Process the raw latencies into statistics
+    processed_results = []
+    for entry in worker_result["results"]:
+        latencies_ms = entry["latencies_ms"]
+        processed_results.append({
+            "batch_size": entry["batch_size"],
+            "image_size": entry["image_size"],
+            "mean": float(np.mean(latencies_ms)),
+            "median": float(np.median(latencies_ms)),
+            "std": float(np.std(latencies_ms)),
+            **{
+                f"p{p}": float(np.percentile(latencies_ms, p))
+                for p in selected_percentiles
+            },
+        })
 
     return {
-        "encoder_type": type(encoder).__name__,
-        "num_warmup": num_warmup,
-        "num_iterations": num_iterations,
-        "results": results,
+        "encoder_type": worker_result["encoder_type"],
+        "num_warmup": worker_result["num_warmup"],
+        "num_iterations": worker_result["num_iterations"],
+        "results": processed_results,
     }
 
 
@@ -440,32 +310,31 @@ def benchmark_multimodal_processor(
         "mm_processor_stats": mm_processor_metrics,
     }
 
-    # Add encoder benchmarking if requested
-    if getattr(args, "benchmark_encoder", False):
-        print("\nBenchmarking encoder forward pass...")
-        batch_sizes = [int(x) for x in args.encoder_batch_sizes.split(",")]
+    # Always run encoder benchmarking
+    print("\nBenchmarking encoder forward pass...")
+    batch_sizes = [int(x) for x in args.encoder_batch_sizes.split(",")]
 
-        # Get image sizes from bucket config
-        bucket_config = getattr(args, "random_mm_bucket_config", None)
-        if bucket_config:
-            image_sizes = [
-                (h, w)
-                for (h, w, frames) in bucket_config
-                if frames == 1  # Only static images
-            ]
-        else:
-            # Default image sizes if no bucket config
-            image_sizes = [(224, 224), (336, 336)]
+    # Get image sizes from bucket config
+    bucket_config = getattr(args, "random_mm_bucket_config", None)
+    if bucket_config:
+        image_sizes = [
+            (h, w)
+            for (h, w, frames) in bucket_config.keys()
+            if frames == 1  # Only static images
+        ]
+    else:
+        # Default image sizes if no bucket config
+        image_sizes = [(224, 224), (336, 336)]
 
-        encoder_results = benchmark_encoder_forward(
-            llm.llm_engine,
-            batch_sizes=batch_sizes,
-            image_sizes=image_sizes,
-            num_warmup=args.encoder_num_warmup,
-            num_iterations=args.encoder_num_iterations,
-            selected_percentiles=selected_percentiles,
-        )
-        benchmark_result["encoder_stats"] = encoder_results
+    encoder_results = benchmark_encoder_forward(
+        llm,
+        batch_sizes=batch_sizes,
+        image_sizes=image_sizes,
+        num_warmup=args.encoder_num_warmup,
+        num_iterations=args.encoder_num_iterations,
+        selected_percentiles=selected_percentiles,
+    )
+    benchmark_result["encoder_stats"] = encoder_results
 
     return benchmark_result
 
@@ -518,12 +387,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         help="Disable tqdm progress bar.",
     )
 
-    # Encoder benchmarking arguments
-    parser.add_argument(
-        "--benchmark-encoder",
-        action="store_true",
-        help="Also benchmark encoder forward pass latency.",
-    )
+    # Encoder benchmarking arguments (encoder benchmarking is always enabled)
     parser.add_argument(
         "--encoder-batch-sizes",
         type=str,

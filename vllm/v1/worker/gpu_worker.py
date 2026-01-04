@@ -549,6 +549,126 @@ class Worker(WorkerBase):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 
+    def benchmark_encoder(
+        self,
+        batch_sizes: list[int],
+        image_sizes: list[tuple[int, int]],
+        num_warmup: int,
+        num_iterations: int,
+    ) -> dict[str, Any] | None:
+        """
+        Benchmark vision encoder forward pass latency.
+
+        This method runs on the GPU worker where the model lives,
+        allowing direct access to the vision encoder for benchmarking.
+
+        Args:
+            batch_sizes: List of batch sizes to test
+            image_sizes: List of (height, width) tuples to test
+            num_warmup: Number of warmup iterations
+            num_iterations: Number of timed iterations
+
+        Returns:
+            Dict with encoder stats, or None if encoder not found
+        """
+        import time
+
+        model = self.model_runner.get_model()
+
+        # Extract vision encoder from model
+        encoder = None
+        if hasattr(model, "vision_tower"):
+            encoder = model.vision_tower  # LLaVA-style
+        elif hasattr(model, "vision_model"):
+            encoder = model.vision_model  # Other styles
+        elif hasattr(model, "visual"):
+            encoder = model.visual  # Qwen-VL style
+
+        if encoder is None:
+            return None
+
+        # Check if encoder is a supported type
+        encoder_type = type(encoder).__name__
+        is_supported = False
+        try:
+            from vllm.model_executor.models.clip import CLIPVisionModel
+            from vllm.model_executor.models.siglip import SiglipVisionModel
+
+            is_supported = isinstance(encoder, (CLIPVisionModel, SiglipVisionModel))
+        except ImportError:
+            pass
+
+        # Get device and dtype from encoder
+        device = next(encoder.parameters()).device
+        dtype = next(encoder.parameters()).dtype
+
+        # Get encoder config for num_channels and image size
+        # Try multiple paths to find the config
+        config = getattr(encoder, "config", None)
+        if config is None:
+            config = getattr(encoder, "vision_config", None)
+        if config is None and hasattr(encoder, "vision_model"):
+            config = getattr(encoder.vision_model, "config", None)
+        
+        num_channels = getattr(config, "num_channels", 3) if config else 3
+        
+        # Get expected image size from encoder config
+        expected_image_size = getattr(config, "image_size", None) if config else None
+        if expected_image_size is not None:
+            # Use the encoder's expected image size
+            image_sizes = [(expected_image_size, expected_image_size)]
+
+        results = []
+        encoder.eval()
+
+        for batch_size in batch_sizes:
+            for height, width in image_sizes:
+                # Create dummy input tensor
+                inputs = torch.randn(
+                    batch_size,
+                    num_channels,
+                    height,
+                    width,
+                    device=device,
+                    dtype=dtype,
+                )
+
+                # Warmup
+                with torch.no_grad():
+                    for _ in range(num_warmup):
+                        _ = encoder(inputs)
+
+                # Timed runs with CUDA synchronization
+                torch.cuda.synchronize()
+                latencies = []
+                with torch.no_grad():
+                    for _ in range(num_iterations):
+                        torch.cuda.synchronize()
+                        start = time.perf_counter()
+                        _ = encoder(inputs)
+                        torch.cuda.synchronize()
+                        end = time.perf_counter()
+                        latencies.append((end - start) * 1000)  # Convert to ms
+
+                results.append({
+                    "batch_size": batch_size,
+                    "image_size": f"{height}x{width}",
+                    "latencies_ms": latencies,
+                })
+
+                # Free memory
+                del inputs
+                torch.cuda.empty_cache()
+
+        return {
+            "encoder_type": encoder_type,
+            "is_supported": is_supported,
+            "num_warmup": num_warmup,
+            "num_iterations": num_iterations,
+            "results": results,
+        }
+
+
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish
         # new/cached request numbers in each iteration
