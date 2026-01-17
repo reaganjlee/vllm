@@ -135,6 +135,11 @@ class MultiModalRegistry:
             mm_config.get_limit_per_prompt(modality) == 0
             for modality in supported_modalities
         ):
+            # If enable_mm_embeds is True, we still need MM infrastructure
+            # to process pre-computed embeddings even though encoder won't run
+            if mm_config.enable_mm_embeds:
+                return True
+
             logger.info_once(
                 "All limits of multimodal modalities supported by the model "
                 "are set to 0, running in text-only mode."
@@ -168,10 +173,18 @@ class MultiModalRegistry:
             profiler.get_mm_limits() if profiler_limits is None else profiler_limits
         )
 
-        return profiler.get_mm_max_tokens(
-            seq_len,
-            {modality: 1 for modality, limit in profiler_limits.items() if limit > 0},
-        )
+        # When enable_mm_embeds is True, we need to include modalities even with
+        # limit=0 to properly allocate encoder cache for pre-computed embeddings
+        mm_config = model_config.multimodal_config
+        enable_mm_embeds = mm_config is not None and mm_config.enable_mm_embeds
+
+        if enable_mm_embeds:
+            # Include all modalities (even limit=0) for embedding support
+            modality_counts = {modality: 1 for modality in profiler_limits.keys()}
+        else:
+            modality_counts = {modality: 1 for modality, limit in profiler_limits.items() if limit > 0}
+
+        return profiler.get_mm_max_tokens(seq_len, modality_counts)
 
     def get_mm_limits_per_prompt(
         self,

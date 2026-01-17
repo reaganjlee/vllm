@@ -390,6 +390,7 @@ class GPUModelRunner(
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
+        self.supports_mm_embeds = model_config.multimodal_config.enable_mm_embeds
 
         if self.model_config.is_encoder_decoder:
             # Maximum length of the encoder input, only for encoder-decoder
@@ -554,8 +555,8 @@ class GPUModelRunner(
             self.max_num_reqs, dtype=torch.int64
         )
 
-        # Only relevant for multimodal models
-        if self.supports_mm_inputs:
+        # Only relevant for multimodal models (including embedding-only mode)
+        if self.supports_mm_inputs or self.supports_mm_embeds:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -2616,13 +2617,16 @@ class GPUModelRunner(
         # modal outputs after that to ensure the correct order
         ec_connector_output = None
 
-        if self.supports_mm_inputs and is_first_rank and not is_encoder_decoder:
-            # Run the multimodal encoder if any.
-            with self.maybe_get_ec_connector_output(
-                scheduler_output,
-                encoder_cache=self.encoder_cache,
-            ) as ec_connector_output:
-                self._execute_mm_encoder(scheduler_output)
+        if (self.supports_mm_inputs or self.supports_mm_embeds) and is_first_rank and not is_encoder_decoder:
+            if self.supports_mm_inputs:
+                with self.maybe_get_ec_connector_output(
+                    scheduler_output,
+                    encoder_cache=self.encoder_cache,
+                ) as ec_connector_output:
+                    self._execute_mm_encoder(scheduler_output)
+                    mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
+            else:
+                # Embedding-only mode: skip encoder, just gather pre-computed embeddings
                 mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -3721,7 +3725,7 @@ class GPUModelRunner(
                     else:
                         target_hidden_states = hidden_states[:total_num_tokens]
 
-            if self.supports_mm_inputs:
+            if self.supports_mm_inputs or self.supports_mm_embeds:
                 mm_embed_inputs = self._gather_mm_embeddings(
                     scheduler_output,
                     shift_computed_tokens=1,
@@ -4354,7 +4358,7 @@ class GPUModelRunner(
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
             model_kwargs = self._init_model_kwargs()
-            if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
+            if (self.supports_mm_inputs or self.supports_mm_embeds) and not self.model_config.is_encoder_decoder:
                 input_ids, inputs_embeds = self._prepare_mm_inputs(num_tokens_padded)
 
                 model_kwargs = {
@@ -4662,36 +4666,50 @@ class GPUModelRunner(
                     # modality with the max possible input tokens even when
                     # it supports multiple.
                     dummy_modality = mm_budget.get_modality_with_max_tokens()
-                    max_mm_items_per_batch = mm_budget.max_items_per_batch_by_modality[
-                        dummy_modality
-                    ]
 
-                    logger.info(
-                        "Encoder cache will be initialized with a budget of "
-                        "%s tokens, and profiled with %s %s items of the "
-                        "maximum feature size.",
-                        encoder_budget,
-                        max_mm_items_per_batch,
-                        dummy_modality,
-                    )
+                    # Skip encoder profiling in embedding-only mode (encoder
+                    # not loaded, only accepting pre-computed embeddings)
+                    mm_config = self.model_config.multimodal_config
+                    if (mm_config.enable_mm_embeds
+                            and mm_config.get_limit_per_prompt(
+                                dummy_modality) == 0):
+                        logger.info(
+                            "Skipping encoder profiling for embedding-only "
+                            "mode (modality=%s has limit=0 with "
+                            "enable_mm_embeds=True).",
+                            dummy_modality,
+                        )
+                    else:
+                        max_mm_items_per_batch = mm_budget.max_items_per_batch_by_modality[
+                            dummy_modality
+                        ]
 
-                    # Create dummy batch of multimodal inputs.
-                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(
-                        dummy_modality,
-                        max_mm_items_per_batch,
-                    )
+                        logger.info(
+                            "Encoder cache will be initialized with a budget "
+                            "of %s tokens, and profiled with %s %s items of "
+                            "the maximum feature size.",
+                            encoder_budget,
+                            max_mm_items_per_batch,
+                            dummy_modality,
+                        )
 
-                    # Run multimodal encoder.
-                    dummy_encoder_outputs = self.model.embed_multimodal(
-                        **batched_dummy_mm_inputs
-                    )
+                        # Create dummy batch of multimodal inputs.
+                        batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                            dummy_modality,
+                            max_mm_items_per_batch,
+                        )
 
-                    sanity_check_mm_encoder_outputs(
-                        dummy_encoder_outputs,
-                        expected_num_items=max_mm_items_per_batch,
-                    )
-                    for i, output in enumerate(dummy_encoder_outputs):
-                        self.encoder_cache[f"tmp_{i}"] = output
+                        # Run multimodal encoder.
+                        dummy_encoder_outputs = self.model.embed_multimodal(
+                            **batched_dummy_mm_inputs
+                        )
+
+                        sanity_check_mm_encoder_outputs(
+                            dummy_encoder_outputs,
+                            expected_num_items=max_mm_items_per_batch,
+                        )
+                        for i, output in enumerate(dummy_encoder_outputs):
+                            self.encoder_cache[f"tmp_{i}"] = output
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
