@@ -741,8 +741,6 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         input_modality = modality.replace("_embeds", "")
         num_items = len(self._items_by_modality[modality]) + 1
 
-        print(f"add: modality={modality}, input_modality={input_modality}, num_items={num_items}")
-
         mm_config = self.model_config.multimodal_config
         if mm_config.enable_mm_embeds and mm_config.get_limit_per_prompt(input_modality) == 0:
             # Additional check with info logging for this specific case in BaseMultiModalProcessor

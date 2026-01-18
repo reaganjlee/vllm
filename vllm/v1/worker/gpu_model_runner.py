@@ -390,8 +390,6 @@ class GPUModelRunner(
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
-        self.supports_mm_embeds = model_config.multimodal_config.enable_mm_embeds
-
         if self.model_config.is_encoder_decoder:
             # Maximum length of the encoder input, only for encoder-decoder
             # models.
@@ -556,7 +554,7 @@ class GPUModelRunner(
         )
 
         # Only relevant for multimodal models (including embedding-only mode)
-        if self.supports_mm_inputs or self.supports_mm_embeds:
+        if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -2617,16 +2615,12 @@ class GPUModelRunner(
         # modal outputs after that to ensure the correct order
         ec_connector_output = None
 
-        if (self.supports_mm_inputs or self.supports_mm_embeds) and is_first_rank and not is_encoder_decoder:
-            if self.supports_mm_inputs:
-                with self.maybe_get_ec_connector_output(
-                    scheduler_output,
-                    encoder_cache=self.encoder_cache,
-                ) as ec_connector_output:
-                    self._execute_mm_encoder(scheduler_output)
-                    mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
-            else:
-                # Embedding-only mode: skip encoder, just gather pre-computed embeddings
+        if self.supports_mm_inputs and is_first_rank and not is_encoder_decoder:
+            with self.maybe_get_ec_connector_output(
+                scheduler_output,
+                encoder_cache=self.encoder_cache,
+            ) as ec_connector_output:
+                self._execute_mm_encoder(scheduler_output)
                 mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -3725,7 +3719,7 @@ class GPUModelRunner(
                     else:
                         target_hidden_states = hidden_states[:total_num_tokens]
 
-            if self.supports_mm_inputs or self.supports_mm_embeds:
+            if self.supports_mm_inputs:
                 mm_embed_inputs = self._gather_mm_embeddings(
                     scheduler_output,
                     shift_computed_tokens=1,
@@ -4358,7 +4352,7 @@ class GPUModelRunner(
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
             model_kwargs = self._init_model_kwargs()
-            if (self.supports_mm_inputs or self.supports_mm_embeds) and not self.model_config.is_encoder_decoder:
+            if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 input_ids, inputs_embeds = self._prepare_mm_inputs(num_tokens_padded)
 
                 model_kwargs = {
