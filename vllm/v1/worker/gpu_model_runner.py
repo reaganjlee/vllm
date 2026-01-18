@@ -390,6 +390,7 @@ class GPUModelRunner(
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
+
         if self.model_config.is_encoder_decoder:
             # Maximum length of the encoder input, only for encoder-decoder
             # models.
@@ -553,7 +554,7 @@ class GPUModelRunner(
             self.max_num_reqs, dtype=torch.int64
         )
 
-        # Only relevant for multimodal models (including embedding-only mode)
+        # Only relevant for multimodal models
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
 
@@ -2616,6 +2617,7 @@ class GPUModelRunner(
         ec_connector_output = None
 
         if self.supports_mm_inputs and is_first_rank and not is_encoder_decoder:
+            # Run the multimodal encoder if any.
             with self.maybe_get_ec_connector_output(
                 scheduler_output,
                 encoder_cache=self.encoder_cache,
