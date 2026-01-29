@@ -1,0 +1,7 @@
+cbd5e07a5 (+2/-46) [Model] Use merge_by_field_config for MM models (Qwen series) (#27546)
+acaa2c0a4 (+39/-20) [Core] Reuse empty block lists whenever possible in KVCacheBlocks to mitigate GC costs (#24964)
+cd9890544 (+19/-29) fix(v1/kv_cache): resolve async KV transfer bug in cascade attention (#23485)
+d100d78eb (+55/-29) Optimize KV cache distribution for asymmetric pipeline parallelism (#25164)
+9c5ee91b2 (+18/-22) [ROCm] [VL] [Bugfix] Fix vit flash attn dispatcher logic for ROCm (#26104)
+bd51f78e3 (+1/-49) [V0 Deprecation][Models] Remove all V0 condition for mm embeddings merge (#25331)
+8bf8f4582 (+53/-40) [Core] Don't count preempted tokens in prefix cache hit rate (#25787)
