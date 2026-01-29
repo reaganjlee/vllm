@@ -343,23 +343,45 @@ def start_server(log_file: Path, logger: logging.Logger) -> subprocess.Popen:
     return process
 
 
-def wait_for_server_ready(logger: logging.Logger, timeout: int = SERVER_STARTUP_TIMEOUT) -> bool:
-    """Poll health endpoint until ready or timeout"""
+def wait_for_server_ready(logger: logging.Logger, server_process: subprocess.Popen,
+                          log_file: Path, timeout: int = SERVER_STARTUP_TIMEOUT) -> tuple[bool, Optional[str]]:
+    """
+    Poll health endpoint until ready, process exits, or timeout.
+    Returns (success, error_message).
+    """
     logger.info(f"Waiting for server to be ready (timeout: {timeout}s)")
     start_time = time.time()
 
     while time.time() - start_time < timeout:
+        # Check if server process has exited (crashed)
+        exit_code = server_process.poll()
+        if exit_code is not None:
+            # Process has exited - read log file for error details
+            error_msg = f"Server process exited with code {exit_code}"
+            try:
+                with open(log_file, 'r') as f:
+                    log_content = f.read()
+                # Get last 50 lines for error context
+                log_lines = log_content.strip().split('\n')
+                last_lines = '\n'.join(log_lines[-50:])
+                error_msg = f"{error_msg}\n\nLast 50 lines of log:\n{last_lines}"
+            except Exception as e:
+                error_msg = f"{error_msg} (failed to read log: {e})"
+
+            logger.error(f"Server process crashed with exit code {exit_code}")
+            return False, error_msg
+
         try:
             response = requests.get(SERVER_HEALTH_URL, timeout=5)
             if response.status_code == 200:
                 logger.info("Server is ready")
-                return True
+                return True, None
         except requests.exceptions.RequestException:
             pass
         time.sleep(2)
 
     logger.error(f"Server failed to start within {timeout} seconds")
-    return False
+    return False, f"Server failed to start within {timeout} seconds"
 
 
 def stop_server(process: subprocess.Popen, logger: logging.Logger) -> None:
@@ -540,10 +562,11 @@ def verify_commit(commit_hash: str) -> dict:
         server_process = start_server(log_file, logger)
 
         # Wait for server to be ready
-        if not wait_for_server_ready(logger):
+        server_ready, startup_error = wait_for_server_ready(logger, server_process, log_file)
+        if not server_ready:
             results["status"] = "bad"
             results["error_type"] = "server_startup"
-            results["error_message"] = "Server failed to start within timeout"
+            results["error_message"] = startup_error[:500] if startup_error else "Server failed to start"
             return results
 
         # Record idle memory
