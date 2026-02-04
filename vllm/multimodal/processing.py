@@ -1582,18 +1582,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_config = self.info.ctx.model_config.get_multimodal_config()
 
         for modality, items in mm_items.items():
-            if mm_config.enable_mm_embeds and mm_config.get_limit_per_prompt(modality) == 0:
-                logger.info(
-                    f"Skipping count validation for modality '{modality}' "
-                    f"(embeddings with limit=0)"
-                )
-                continue
-            elif isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
-                raise ValueError(
-                    f"You must set `--enable-mm-embeds` to input "
-                    f"`{modality}_embeds`"
-                )
-
+            if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
+                if not mm_config.enable_mm_embeds:
+                    raise ValueError(
+                        f"You must set `--enable-mm-embeds` to input "
+                        f"`{modality}_embeds`"
+                    )
+                if mm_config.get_limit_per_prompt(modality) == 0:
+                    logger.info(
+                        f"Skipping count validation for modality '{modality}' "
+                        f"(embeddings with limit=0)"
+                    )
+                    continue
             self.validate_num_items(modality, len(items))
 
         return mm_items

@@ -56,6 +56,21 @@ class MultiModalBudget:
             max_tokens_by_modality,
         )
 
+        # When enable_mm_embeds=True and all limits are 0, we still need
+        # encoder cache space to store pre-computed embeddings. Use the
+        # scheduler's default settings as a minimum.
+        mm_config = model_config.get_multimodal_config()
+        if (mm_config is not None and mm_config.enable_mm_embeds
+                and encoder_compute_budget == 0 and encoder_cache_size == 0):
+            encoder_compute_budget = scheduler_config.max_num_encoder_input_tokens
+            encoder_cache_size = scheduler_config.encoder_cache_size
+            logger.info(
+                "enable_mm_embeds is True with all modality limits=0. "
+                "Using default encoder cache settings for embeddings: "
+                f"compute_budget={encoder_compute_budget}, "
+                f"cache_size={encoder_cache_size}"
+            )
+
         self.encoder_compute_budget = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
 

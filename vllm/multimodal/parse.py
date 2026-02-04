@@ -654,11 +654,17 @@ class MultiModalDataParser:
 
         mm_items = MultiModalDataItems()
         for k, v in mm_data.items():
-            if k not in subparsers:
+            # Handle {modality}_embeds keys (e.g., "image_embeds" -> "image")
+            if k.endswith("_embeds"):
+                modality = k[:-7]  # Remove "_embeds" suffix
+            else:
+                modality = k
+
+            if modality not in subparsers:
                 raise ValueError(f"Unsupported modality: {k}")
 
             # ignore empty embedding data
-            if (parsed_data := subparsers[k](v)) is not None:
-                mm_items[k] = parsed_data
+            if (parsed_data := subparsers[modality](v)) is not None:
+                mm_items[modality] = parsed_data
 
         return mm_items
